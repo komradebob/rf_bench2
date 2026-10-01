@@ -1,0 +1,7 @@
+.aider*
+
+# arduino-cli build output
+build/
+
+# Local Wi-Fi credentials. Copy secrets.h.example to secrets.h and fill it in.
+secrets.h
