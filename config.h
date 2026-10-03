@@ -94,6 +94,23 @@ extern double outputMHz;
 extern uint8_t rfPower;
 extern bool rfOutputEnabled;
 
+/*
+  Firmware version lives in version.h. FIRMWARE_VERSION_MINOR is bumped
+  automatically by `make compile`, so every recompile yields a distinct
+  version. The packed value is stored alongside the calibration record
+  and compared on load; a record written by a different version is
+  discarded rather than half-trusted.
+*/
+#include "version.h"
+
+/*
+  Version of the calibration record found in EEPROM, or 0 when no valid
+  record is present. Set by loadCalibrationFromEEPROM().
+*/
+extern uint32_t eepromVersion;
+
+void printPackedVersion(uint32_t version);
+
 // Function declarations
 void printLine(const __FlashStringHelper* text);
 void printLine(const String& text);

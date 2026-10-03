@@ -21,6 +21,9 @@ SynthType synthType = SYNTH_ADF4350;
 // MUXOUT diagnostic tap, defaulting to digital lock detect
 uint8_t muxoutMode = MUXOUT_DIGITAL_LD;
 
+// Version of the calibration record found in EEPROM, 0 when none
+uint32_t eepromVersion = 0;
+
 // Initial operating values
 double referenceMHz = DEFAULT_REFERENCE_MHZ;
 double nominalReferenceMHz = DEFAULT_REFERENCE_MHZ;

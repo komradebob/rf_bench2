@@ -124,10 +124,19 @@ struct CalibrationData {
   double correctionFactor;
   double referenceMHz;
   double nominalReferenceMHz;
+  uint32_t version;
   uint32_t checksum;
 };
 
 const uint32_t CALIBRATION_MAGIC = 0x41444643; // 'ADFC'
+
+void printPackedVersion(uint32_t version) {
+  Serial.print((version >> 16) & 0xFF);
+  Serial.print('.');
+  Serial.print((version >> 8) & 0xFF);
+  Serial.print('.');
+  Serial.print(version & 0xFF);
+}
 
 uint32_t calculateCalibrationChecksum(const CalibrationData& data) {
   uint32_t crc = 0x12345678;
@@ -152,12 +161,23 @@ bool loadCalibrationFromEEPROM() {
   EEPROM.get(0, data);
   EEPROM.end();
 
+  eepromVersion = 0;
+
   if (data.magic != CALIBRATION_MAGIC) {
     return false;
   }
 
   if (data.checksum != calculateCalibrationChecksum(data)) {
     Serial.println(F("EEPROM calibration checksum mismatch."));
+    return false;
+  }
+
+  if (data.version != FIRMWARE_VERSION) {
+    Serial.print(F("EEPROM calibration written by firmware version "));
+    printPackedVersion(data.version);
+    Serial.print(F(", this is version "));
+    printPackedVersion(FIRMWARE_VERSION);
+    Serial.println(F(". Discarding it."));
     return false;
   }
 
@@ -182,6 +202,7 @@ bool loadCalibrationFromEEPROM() {
   refCorrectionFactor = data.correctionFactor;
   referenceMHz = data.referenceMHz;
   nominalReferenceMHz = data.nominalReferenceMHz;
+  eepromVersion = data.version;
   return true;
 }
 
@@ -191,6 +212,7 @@ bool saveCalibrationToEEPROM() {
   data.correctionFactor = refCorrectionFactor;
   data.referenceMHz = referenceMHz;
   data.nominalReferenceMHz = nominalReferenceMHz;
+  data.version = FIRMWARE_VERSION;
   data.checksum = calculateCalibrationChecksum(data);
 
   EEPROM.begin(sizeof(CalibrationData));
@@ -226,6 +248,17 @@ void printMenu() {
   Serial.print(F("Reference Frequency: "));
   Serial.print(referenceMHz, 6);
   Serial.println(F(" MHz"));
+
+  Serial.print(F("Firmware Version:    "));
+  printPackedVersion(FIRMWARE_VERSION);
+  Serial.println();
+
+  Serial.print(F("EEPROM Calibration:  "));
+  if (eepromVersion == FIRMWARE_VERSION) {
+    printPackedVersion(eepromVersion);
+  } else {
+    Serial.println(F("none, using defaults"));
+  }
   Serial.println(F("-----------------------------------"));
   Serial.println(F("========== RF BENCH MENU =========="));
   Serial.println(F("s - Select synthesizer"));
@@ -275,6 +308,18 @@ void showSettings() {
   Serial.print(F("Nominal reference:     "));
   Serial.print(nominalReferenceMHz, 6);
   Serial.println(F(" MHz"));
+
+  Serial.print(F("Firmware version:      "));
+  printPackedVersion(FIRMWARE_VERSION);
+  Serial.println();
+
+  Serial.print(F("EEPROM calibration:    "));
+  if (eepromVersion == FIRMWARE_VERSION) {
+    printPackedVersion(eepromVersion);
+    Serial.println(F(" (valid)"));
+  } else {
+    Serial.println(F("none, using defaults"));
+  }
 
   Serial.print(F("Reference correction factor: "));
   Serial.println(refCorrectionFactor, 8);
@@ -580,6 +625,7 @@ void factorySettings() {
   rfPower = 3;
   rfOutputEnabled = true;
   muxoutMode = MUXOUT_DIGITAL_LD;
+  eepromVersion = 0;
 
   EEPROM.begin(sizeof(CalibrationData));
 
