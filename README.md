@@ -79,6 +79,13 @@ in a defined state at reset.
 
 ## Build and upload
 
+Compiling is timestamp driven: `compile` and `upload` rebuild only when a
+source file is newer than the last binary, so they do nothing when nothing
+has changed. Every real rebuild bumps `FIRMWARE_VERSION_MINOR` in
+`version.h`, which gives each binary a version of its own. The version is
+stored with the calibration record and checked on load, so a record written
+by different firmware is discarded rather than half-trusted.
+
 ```sh
 make compile
 make upload
@@ -88,13 +95,40 @@ make monitor
 The Makefile defaults:
 
     FQBN ?= esp8266:esp8266:oak
-    PORT ?= /dev/tty.usbserial-1
+    PORT ?= /dev/tty.usbserial-2
     BAUD ?= 115200
+    UPLOAD_SPEED ?= 460800
+    ESPTOOL ?= ~/.local/bin/esptool
+
+### Holding the chip in its bootloader
+
+`upload` does not drive EN or GPIO0 from the adapter. The auto-reset network
+on this bench does not assert them, so esptool cannot strap the chip by
+itself, and which adapter line reaches which pin makes no difference. The
+chip is held in the ROM bootloader by hand instead:
+
+1. Disconnect RTS and DTR from the FTDI.
+2. Jumper P2 (GPIO0) to ground.
+3. Power-cycle the Oak.
+4. `make upload`
+5. Remove the jumper and power-cycle again to run the sketch.
+
+Flashing then runs esptool with `--before no-reset`, which attaches to the
+bootloader that is already running, and `--after no-reset`, which leaves the
+chip there rather than toggling RTS for a hard reset. `arduino-cli` compiles
+but never flashes, because it has no way to pass `--before`.
+
+Flashing needs esptool 4 or newer, which the Arduino ESP8266 core does not
+provide, since it bundles esptool 3:
+
+```sh
+uv tool install esptool
+```
 
 If macOS exposes the adapter as a `cu` device:
 
 ```sh
-make PORT=/dev/cu.usbserial-1 upload
+make PORT=/dev/cu.usbserial-2 upload
 ```
 
 If `arduino-cli` fails on a temporary file, point `TMPDIR` somewhere
