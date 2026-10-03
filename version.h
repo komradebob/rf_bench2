@@ -14,7 +14,7 @@
 */
 
 #define FIRMWARE_VERSION_MAJOR 1
-#define FIRMWARE_VERSION_MINOR 8
+#define FIRMWARE_VERSION_MINOR 13
 #define FIRMWARE_VERSION_PATCH 0
 
 #define PACK_VERSION(major, minor, patch) \

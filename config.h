@@ -53,6 +53,22 @@ const uint8_t ADF_LD_PIN   = P5;
 */
 const uint8_t ADF_MUXOUT_PIN = 16;
 
+/*
+  Pin the reference self-check reads MUXOUT on.
+
+  It cannot be P10 / GPIO16, which is otherwise the obvious choice. The
+  ESP8266 core's attachInterrupt() only wires up pins 0 to 15: the setup in
+  core_esp8266_wiring_digital.cpp is guarded by "if (pin < 16)", so an
+  interrupt on GPIO16 is accepted and then silently ignored, and the edge
+  count comes back zero with no error anywhere.
+
+  GPIO12 / P8 is the best of what is left: interrupts work, and unlike P1 it
+  has no onboard LED loading the line. Being a boot strapping pin does not
+  matter here, because it is only ever read as an input after boot and
+  MUXOUT itself is three-state until the sketch asks for something else.
+*/
+const uint8_t MUXOUT_MEASURE_PIN = 12;
+
 // RF power detector
 const uint8_t RF_POWER_PIN = A0;
 
@@ -119,6 +135,7 @@ void printMenu();
 void serviceSerialMenu();
 void reportLockStatus();
 void reportAdcValue();
+void measureReferenceFromMuxout();
 
 void programSynthesizer();
 void calculateRegisters();

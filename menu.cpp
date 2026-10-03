@@ -272,6 +272,7 @@ void printMenu() {
   Serial.println(F("d - Disable RF output"));
   Serial.println(F("a - Read RF detector A/D"));
   Serial.println(F("l - Read lock status"));
+  Serial.println(F("w - Measure reference via MUXOUT (needs P8)"));
   Serial.println(F("u - Select MUXOUT monitor source"));
   Serial.println(F("i - Show current settings"));
   Serial.println(F("m - Show this menu"));
@@ -727,6 +728,10 @@ void handleCommand(char command) {
 
     case 'l':
       reportLockStatus();
+      break;
+
+    case 'w':
+      measureReferenceFromMuxout();
       break;
 
     case 'u':

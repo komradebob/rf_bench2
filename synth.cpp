@@ -12,9 +12,9 @@ static const uint32_t ADF_REG0_FRAC    = 0x00007FF8UL;
 static const uint32_t ADF_REG1_MOD     = 0x00007FF8UL;
 static const uint32_t ADF_REG1_PHASE   = 0x07FF8000UL;
 static const uint32_t ADF_REG1_PR1_8_9 = 0x08000000UL;
-static const uint32_t ADF_REG2_RCNT    = 0x00FFC000UL;
+static const uint32_t ADF_REG2_RCNT    = 0x03FFC000UL;
 static const uint32_t ADF_REG2_DB      = 0x00002000UL;
-static const uint32_t ADF_REG2_CP      = 0x00000E00UL;
+static const uint32_t ADF_REG2_CP      = 0x00001E00UL;
 static const uint32_t ADF_REG2_LDF     = 0x00000100UL;
 static const uint32_t ADF_REG2_PD_POL  = 0x00000040UL;
 static const uint32_t ADF_REG2_MUXOUT  = 0x1C000000UL;
@@ -252,7 +252,22 @@ void calculateRegisters() {
     0x00000002;
 
   /*
-    R3: band select clock mode, address 3
+    R3 is written as its address alone.
+
+    The band select clock is taken from R4: the 8-bit divider in bits 19:12
+    with bit 23 clear, which is the low mode the ADF4350 uses. R3 also
+    carries a legacy 12-bit clock divider whose mode field is bits 16:15,
+    and setting it wrongly stops the VCO from calibrating into its band, so
+    the safe value is the default one the Linux driver uses.
+  */
+  adfRegisters[3] = 0x00000003;
+
+  /*
+    R4: RF output enable, RF power, band select clock divider,
+    output divider, feedback from VCO, address 4
+
+    The band select clock has to stay under 125 MHz, so the divider is the
+    largest one that keeps the divided reference below that.
   */
   uint16_t bandClockDivider = 1;
   while (referenceMHz / bandClockDivider > 125.0 &&
@@ -260,14 +275,6 @@ void calculateRegisters() {
     bandClockDivider++;
   }
 
-  adfRegisters[3] =
-    (0x00030000UL & ADF_REG3_CLKMOD) |
-    0x00000003;
-
-  /*
-    R4: RF output enable, RF power, band select clock divider,
-    output divider, feedback from VCO, address 4
-  */
   adfRegisters[4] = ADF_REG4_FB_FUND;
   adfRegisters[4] &= ~ADF_REG4_PWR;
   adfRegisters[4] |= ((uint32_t)(rfPower & 0x03) << 3) & ADF_REG4_PWR;
@@ -339,6 +346,273 @@ void reportLockStatus() {
     Serial.println(F("LOCKED"));
   } else {
     Serial.println(F("NOT LOCKED"));
+  }
+}
+
+/*
+  Reference self-check.
+
+  MUXOUT in reference divider mode outputs fREFIN / R. At R = 1 that is the
+  full 10 MHz, far past what the ESP8266 can count from a GPIO interrupt, so
+  the divider is pushed to its maximum of 1023 to bring the tap down to about
+  9.8 kHz. The reference divider output does not depend on the N counter, so
+  the synth cannot lock at that divider setting and its tuning registers are
+  untouched; only R2 is rewritten, and only R2 is put back afterwards.
+
+  Two windows are counted. A dropped edge would bias a single window low, but
+  it cannot bias two independent windows the same way, so a large disagreement
+  between them means the count is unreliable rather than the reference being
+  wrong.
+*/
+static const uint16_t MEASURE_R_COUNTER = 1023;
+static const uint32_t MEASURE_WINDOW_MS = 500;
+static const uint32_t MEASURE_WINDOWS = 2;
+
+static volatile uint32_t muxoutEdgeCount = 0;
+static volatile uint32_t muxoutLastStamp = 0;
+static volatile uint32_t muxoutMinPeriod = 0xFFFFFFFF;
+
+static void IRAM_ATTR countMuxoutEdge() {
+  uint32_t now = micros();
+  uint32_t previous = muxoutLastStamp;
+
+  muxoutLastStamp = now;
+
+  if (previous != 0) {
+    uint32_t period = now - previous;
+
+    if (period < muxoutMinPeriod) {
+      muxoutMinPeriod = period;
+    }
+  }
+
+  muxoutEdgeCount++;
+}
+
+/*
+  Drive MUXOUT to a static level and read it back. DGND and DVDD are the two
+  sources that hold a fixed voltage, so they test the wire and the input pin
+  without needing a frequency to be counted. Returns true when both levels
+  read back correctly, which means anything wrong after this point is in the
+  counting rather than the connection.
+*/
+static bool verifyMuxoutWire() {
+  uint8_t savedMode = muxoutMode;
+
+  muxoutMode = MUXOUT_DGND;
+  adfRegisters[2] = (adfRegisters[2] & ~ADF_REG2_MUXOUT) |
+                    ((MUXOUT_DGND << 26) & ADF_REG2_MUXOUT);
+  writeADFRegister(adfRegisters[2]);
+  delay(5);
+  bool lowReads = digitalRead(MUXOUT_MEASURE_PIN) == LOW;
+
+  muxoutMode = MUXOUT_DVDD;
+  adfRegisters[2] = (adfRegisters[2] & ~ADF_REG2_MUXOUT) |
+                    ((MUXOUT_DVDD << 26) & ADF_REG2_MUXOUT);
+  writeADFRegister(adfRegisters[2]);
+  delay(5);
+  bool highReads = digitalRead(MUXOUT_MEASURE_PIN) == HIGH;
+
+  muxoutMode = savedMode;
+  adfRegisters[2] = (adfRegisters[2] & ~ADF_REG2_MUXOUT) |
+                    (((uint32_t)muxoutMode << 26) & ADF_REG2_MUXOUT);
+  writeADFRegister(adfRegisters[2]);
+
+  Serial.print(F("MUXOUT wired to P8: DGND reads "));
+  Serial.print(lowReads ? F("LOW") : F("HIGH"));
+  Serial.print(F(", DVDD reads "));
+  Serial.print(highReads ? F("HIGH") : F("LOW"));
+  Serial.println();
+
+  return lowReads && highReads;
+}
+
+void measureReferenceFromMuxout() {
+  Serial.print(F("MUXOUT must be connected to Oak P8 (GPIO"));
+  Serial.print(MUXOUT_MEASURE_PIN);
+  Serial.println(F(")."));
+
+  pinMode(MUXOUT_MEASURE_PIN, INPUT);
+
+  if (!verifyMuxoutWire()) {
+    printLine(F("MUXOUT is not reaching P8, so the reference cannot be measured."));
+    printLine(F("Check the wire from the ADF4350 MUXOUT pin to Oak P8."));
+    return;
+  }
+
+  uint32_t savedR2 = adfRegisters[2];
+
+  adfRegisters[2] =
+    (((uint32_t)MEASURE_R_COUNTER << 14) & ADF_REG2_RCNT) |
+    ADF_REG2_DB |
+    ((CHARGE_PUMP_INDEX << 9) & ADF_REG2_CP) |
+    ADF_REG2_PD_POL |
+    ((MUXOUT_R_DIV_OUT << 26) & ADF_REG2_MUXOUT) |
+    0x00000002;
+
+  writeADFRegister(adfRegisters[2]);
+
+  Serial.print(F("R divider set to "));
+  Serial.print(MEASURE_R_COUNTER);
+  Serial.println(F(", counting MUXOUT edges..."));
+
+  uint8_t interruptPin = digitalPinToInterrupt(MUXOUT_MEASURE_PIN);
+  double measured[MEASURE_WINDOWS];
+  double total = 0.0;
+
+  /*
+    Probe the rate with a handful of edges before counting anything. If the R
+    divider is not taking effect the tap is the full reference rate, and
+    counting that would trip the watchdog within milliseconds and take the
+    board down with no output. Sixteen edges is enough to know, and the
+    shortest period seen is the one to trust: a missed edge can only make an
+    interval look longer, never shorter.
+  */
+  muxoutEdgeCount = 0;
+  muxoutLastStamp = 0;
+  muxoutMinPeriod = 0xFFFFFFFF;
+  attachInterrupt(interruptPin, countMuxoutEdge, RISING);
+
+  uint32_t probeStart = micros();
+  while (muxoutEdgeCount < 16 &&
+         (uint32_t)(micros() - probeStart) < 200000UL) {
+    optimistic_yield(1000);
+  }
+
+  uint32_t probePeriod = muxoutMinPeriod;
+  detachInterrupt(interruptPin);
+
+  if (probePeriod == 0xFFFFFFFF) {
+    adfRegisters[2] = savedR2;
+    writeADFRegister(adfRegisters[2]);
+    printLine(F("The reference divider output produced no edges at all."));
+    printLine(F("R divider in R2 may not be reaching the ADF4350."));
+    return;
+  }
+
+  Serial.print(F("Shortest edge interval: "));
+  Serial.print(probePeriod);
+  Serial.println(F(" us"));
+
+  if (probePeriod < 20) {
+    adfRegisters[2] = savedR2;
+    writeADFRegister(adfRegisters[2]);
+    printLine(F("That is faster than 50 kHz, which the Oak cannot count, and"));
+    printLine(F("much faster than fREFIN / 1023 should be. The reference"));
+    printLine(F("divider is not being applied."));
+    return;
+  }
+
+  attachInterrupt(interruptPin, countMuxoutEdge, RISING);
+
+  for (uint8_t i = 0; i < MEASURE_WINDOWS; i++) {
+    muxoutEdgeCount = 0;
+    uint32_t start = micros();
+    uint32_t window = MEASURE_WINDOW_MS * 1000UL;
+
+    while ((uint32_t)(micros() - start) < window) {
+      optimistic_yield(1000);
+    }
+
+    uint32_t edges = muxoutEdgeCount;
+    double windowSeconds = (double)(micros() - start) / 1000000.0;
+    measured[i] = (double)edges / windowSeconds;
+    total += measured[i];
+
+    Serial.print(F("  window "));
+    Serial.print(i + 1);
+    Serial.print(F(": "));
+    Serial.print(edges);
+    Serial.print(F(" edges in "));
+    Serial.print(windowSeconds, 4);
+    Serial.print(F(" s, "));
+    Serial.print(measured[i] / MEASURE_R_COUNTER, 6);
+    Serial.println(F(" MHz reference"));
+  }
+
+  detachInterrupt(interruptPin);
+
+  if (measured[0] == 0.0 && measured[1] == 0.0) {
+    printLine(F("No edges from the interrupt path; retrying by polling."));
+    printLine(F("(interrupts not firing; GPIO16 cannot be used for this.)"));
+
+    for (uint8_t i = 0; i < MEASURE_WINDOWS; i++) {
+      uint32_t start = micros();
+      uint32_t transitions = 0;
+      uint8_t level = digitalRead(MUXOUT_MEASURE_PIN);
+
+      while ((uint32_t)(micros() - start) < MEASURE_WINDOW_MS * 1000UL) {
+        uint8_t now = digitalRead(MUXOUT_MEASURE_PIN);
+
+        if (now != level) {
+          transitions++;
+          level = now;
+        }
+      }
+
+      double windowSeconds = (double)(micros() - start) / 1000000.0;
+      measured[i] = (double)transitions / 2.0 / windowSeconds;
+      total += measured[i];
+
+      Serial.print(F("  polled window "));
+      Serial.print(i + 1);
+      Serial.print(F(": "));
+      Serial.print(transitions);
+      Serial.print(F(" transitions in "));
+      Serial.print(windowSeconds, 4);
+      Serial.print(F(" s, "));
+      Serial.print(measured[i] / MEASURE_R_COUNTER, 6);
+      Serial.println(F(" MHz reference"));
+    }
+  }
+
+  adfRegisters[2] = savedR2;
+  writeADFRegister(adfRegisters[2]);
+
+  double spread = fabs(measured[0] - measured[1]) /
+                  ((measured[0] + measured[1]) / 2.0);
+
+  Serial.println();
+
+  if (measured[0] == 0.0 || measured[1] == 0.0) {
+    printLine(F("No edges counted at all. The wire reads correctly at both DC"));
+    printLine(F("levels, so check that P8 is not loaded and that the reference"));
+    printLine(F("divider output is enabled."));
+    return;
+  }
+
+  if (spread > 0.005) {
+    Serial.print(F("Windows disagree by "));
+    Serial.print(spread * 100.0, 2);
+    Serial.println(F("%, so edges were probably dropped. Treat as unreliable;"));
+    printLine(F("disconnect Wi-Fi and run again."));
+    return;
+  }
+
+  double meanMHz = (total / MEASURE_WINDOWS) / MEASURE_R_COUNTER;
+  double errorMHz = meanMHz - referenceMHz;
+
+  Serial.print(F("Reference measured:  "));
+  Serial.print(meanMHz, 6);
+  Serial.println(F(" MHz"));
+
+  Serial.print(F("Assumed reference:   "));
+  Serial.print(referenceMHz, 6);
+  Serial.println(F(" MHz"));
+
+  Serial.print(F("Difference:          "));
+  Serial.print(errorMHz * 1000.0, 3);
+  Serial.print(F(" kHz, "));
+  Serial.println(errorMHz / referenceMHz * 100.0, 4);
+
+  printLine(F("-----------------------------------"));
+
+  if (fabs(errorMHz / referenceMHz) > 0.001) {
+    printLine(F("Reference is NOT within 0.1% of the assumed value."));
+    printLine(F("Correct the reference with 'r' or calibrate with 'c'."));
+  } else {
+    printLine(F("Reference path checks out within 0.1%."));
+    printLine(F("A wrong output frequency is not a reference problem."));
   }
 }
 
