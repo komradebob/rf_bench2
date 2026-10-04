@@ -277,12 +277,30 @@ kind of fault that produces a locked PLL at the wrong frequency.
 
 `calculateRegisters()` therefore ends each register with its address:
 
-    R0 = 0x00ACD600   INT=345, FRAC=2752,           address 0
-    R1 = 0x0800FFF9   MOD=4095, PHASE=1, 8/9,       address 1
-    R2 = 0x18007E42   R=1, charge pump, MUXOUT,     address 2
-    R3 = 0x00030003   band select clock mode,       address 3
-    R4 = 0x00B0103C   ÷8, power, RF output enable,   address 4
-    R5 = 0x00400005   LD pin in digital mode,       address 5
+    R0 = 0x00500002   INT=160, FRAC=2,              address 0
+    R1 = 0x08008011   MOD=1365, PHASE=1, 8/9,       address 1
+    R2 = 0x18004F42   R=1, PD polarity, CP, MUXOUT, address 2
+    R3 = 0x00840003   band clk mode high, CSR,      address 3
+    R4 = 0x00AFA43C   ÷4, band sel divider 250,     address 4
+    R5 = 0x00420005   LD pin in digital mode,       address 5
+
+(1000 MHz out, 24.9998 MHz reference.)
+
+Two of those fields are not what a datasheet reading alone suggests, and
+both were wrong here until they were compared against a working
+implementation in `../4350/adf4350`:
+
+  R2 DB6, charge pump polarity, must be **set**. Left at the datasheet
+  default of 0 the pump will not pull the VCO onto its target and it parks
+  above the top of its band instead.
+
+  R3 DB23, band select clock mode, must be **set**, paired with a fixed
+  R4 band select divider of 250. That gives a band select clock near
+  100 kHz. Deriving the divider from the reference instead, as this code
+  once did, gives a band select clock of tens of MHz that will not
+  calibrate the VCO into its band.
+
+R0 is also written a second time after the R5 to R0 sequence.
 
 Field masks are declared as named constants in `synth.cpp` rather than
 written as bare shifts, so the bit positions are visible in one place:
@@ -292,7 +310,8 @@ written as bare shifts, so the bit positions are visible in one place:
     R1  MOD   DB14:DB3    mask 0x00007FF8
     R1  PHASE DB26:DB15   mask 0x07FF8000
     R1  PR1   DB27        8/9 prescaler select
-    R2  R     DB23:DB14   mask 0x00FFC000
+    R2  R     DB23:DB14   mask 0x03FFC000
+    R2  CP    DB12:DB9    mask 0x00001E00
     R2  MUXOUT DB28:DB26  mask 0x1C000000
     R4  RF divider       DB22:DB20
     R4  band sel divider  DB19:DB12
@@ -394,11 +413,18 @@ lock signal. Earlier revisions of this code set that mode while labelling
 it digital lock detect, which would have put a solid high on the pin
 regardless of lock state.
 
-The sketch never reads MUXOUT, so wiring it to an Oak pin is optional.
-`ADF_MUXOUT_PIN` is GPIO16, silkscreen P10, and is currently not
-connected. Probing MUXOUT directly on the ADF4350 module header is the
-cleanest measurement. MUXOUT is tristated until R2 is written, so it
-floats during reset, and it is an output, so nothing may back-drive it.
+Wiring MUXOUT to an Oak pin is optional: the sketch only reads it for the
+`w` reference self-check. That check uses `MUXOUT_MEASURE_PIN`, which is
+**GPIO12, silkscreen P8**, and not `ADF_MUXOUT_PIN` (GPIO16, silkscreen
+P10). GPIO16 cannot be used because the ESP8266 core's `attachInterrupt()`
+is guarded by `if (pin < 16)`, so an interrupt on GPIO16 is accepted and
+then silently ignored and the edge count comes back zero. Probing MUXOUT
+directly on the ADF4350 module header remains the cleanest measurement.
+
+MUXOUT is tristated until R2 is written, so it floats during reset, and
+it is an output, so nothing may back-drive it. Note that it is also a
+3.3 V digital output, so feeding it to a frequency counter's 50 ohm RF
+input will overload the counter and produce a confident but wrong reading.
 
 ## Hardware gotchas
 
@@ -410,7 +436,10 @@ chip. The software setting must match whatever is actually connected.
 **MUXOUT is tristated until programmed.** Not an issue for measuring,
 but it means the pin is not a valid reference level at power-up.
 
-**Boot strapping.** Do not attach MUXOUT to GPIO0, GPIO2 or GPIO12.
+**Boot strapping.** Do not attach MUXOUT to GPIO0 or GPIO2. GPIO12 is
+used for the reference self-check despite being a strapping pin, which is
+safe only because it is read as an input after boot and MUXOUT is
+tristated until the sketch programs R2.
 
 ## Troubleshooting
 
@@ -422,9 +451,33 @@ Check the decoded prediction first; if it matches the target and the
 counter does not, the register math is fine and the reference is the
 suspect.
 
-**Not locking.** Check `l`, then the module's reference jumper. If the
+**Not locking.** Check `l` and the module's own lock LED, which is
+independent of this firmware and of the LD wiring, then the module's
+reference jumper. The most informative single test is to change the charge
+pump setting and see whether the output frequency moves: a locked loop's
+output is fixed by N x fPFD / divider regardless of loop gain, so an
+output that responds to a charge pump change is not locked. If the
 register prediction looks right, set MUXOUT to mode 3 and compare
 fREFIN / R against the reference.
+
+**Locking, but the output sits above the target by a constant ratio.**
+Check that the reference in use is the reference actually connected, via
+`i`. Asking for a 4000 MHz VCO against a 25 MHz reference while the
+firmware assumes 10 MHz drives the VCO past the top of its band, where it
+sits with the loop open. This looks like a proportional tracking error
+and is not one; an unlocked VCO does not park in proportion to the
+request.
+
+**The counter reads high or drifts, especially below 1 GHz.** The counter
+input overloads at the default power code 3 in that range. Set RF power to
+code 0 with `p` before measuring. The same applies to probing MUXOUT: a
+3.3 V digital output into a 50 ohm RF input will overload it.
+
+**Reading the reference self-check resets the Oak.** `w` deliberately
+aborts when the tap is faster than 50 kHz rather than counting it into a
+watchdog reset, but if the reference is far from what is configured the
+tap can still be uncountable. Confirm the reference with `i` and a scope
+before trusting `w`.
 
 **`l` reports locked but the counter is empty.** Check the RF output is
 enabled with `e` and that RF power is not at code 0.

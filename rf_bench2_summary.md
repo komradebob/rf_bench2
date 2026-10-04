@@ -306,12 +306,17 @@ the expected reading. Under fractional-N the true rate is
 fPFD * (1 + FRAC / (MOD * INT)), a few hundred ppm above the PFD rate.
 A scope cannot resolve that; a counter can.
 
-The sketch never reads MUXOUT, so wiring it to an Oak pin is optional.
-`ADF_MUXOUT_PIN` in `config.h` is GPIO16, silkscreen P10, and is
-currently not connected. The cleanest measurement is to probe MUXOUT
+Wiring MUXOUT to an Oak pin is optional: the sketch reads it only for the
+`w` reference self-check. `MUXOUT_MEASURE_PIN` in `config.h` is GPIO12,
+silkscreen P8. It cannot be `ADF_MUXOUT_PIN` (GPIO16, silkscreen P10),
+because the ESP8266 core's `attachInterrupt()` is guarded by
+`if (pin < 16)` and silently ignores GPIO16, so the edge count comes back
+zero with no error. The cleanest measurement is still to probe MUXOUT
 directly on the ADF4350 module header and leave the Oak unconnected.
-The Oak pin matters only if the run to the counter is long enough to
-want a termination point away from the module.
+
+MUXOUT is a 3.3 V digital output, so feeding it to a frequency counter's
+50 ohm RF input will overload the counter and give a confident but wrong
+reading.
 
 MUXOUT is an output, so the Oak side must be input only, with no
 pull-ups and nothing that can back-drive it. Note that MUXOUT is
