@@ -238,27 +238,33 @@ void calculateRegisters() {
 
   /*
     R2: 10-bit reference counter, charge pump, lock detect, address 2.
-    MUXOUT is set to digital lock detect (M3:M2:M1 = 110).
     Bit 13 enables double buffering so that the R1 and R4 changes are
     latched by the final write to R0.
+
+    Bit 6, the charge pump polarity, is deliberately left at zero, the
+    ADF4350 default for a standard passive loop filter. Setting it inverted
+    stops the loop from ever pulling the VCO onto its target frequency and
+    leaves it sitting high instead. The symptom is unmistakable once the
+    reference is trusted: the output lands at a repeatable fraction above
+    the request rather than wandering, which is what an unlocked VCO does
+    not do.
   */
   adfRegisters[2] =
     (((uint32_t)rCounter << 14) & ADF_REG2_RCNT) |
     ADF_REG2_DB |
     ((CHARGE_PUMP_INDEX << 9) & ADF_REG2_CP) |
-    ADF_REG2_PD_POL |
     (frac == 0 ? ADF_REG2_LDF : 0UL) |
     ((muxoutMode << 26) & ADF_REG2_MUXOUT) |
     0x00000002;
 
   /*
-    R3 is written as its address alone.
+R3 is written as its address alone.
 
-    The band select clock is taken from R4: the 8-bit divider in bits 19:12
+    The band select clock is taken from R4: the 8-bit divider in bits19:12
     with bit 23 clear, which is the low mode the ADF4350 uses. R3 also
-    carries a legacy 12-bit clock divider whose mode field is bits 16:15,
-    and setting it wrongly stops the VCO from calibrating into its band, so
-    the safe value is the default one the Linux driver uses.
+    carries a legacy 12-bit clock divider whose mode field is bits 16:15.
+    Writing the wrong value there stops the VCO calibrating into its band,
+    so the default of all zeroes is used.
   */
   adfRegisters[3] = 0x00000003;
 
