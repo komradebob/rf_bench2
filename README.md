@@ -5,7 +5,7 @@ bench, driven from an Arduino Oak over a bit-banged 3-wire serial
 interface.
 
 It sets the output frequency and RF power from a serial menu, reports
-PLL lock, reads an RF power detector, and calibrates the reference
+PLL lock, reads an RF power detector, and reports the reference it is using
 against an external frequency counter.
 
 ## Contents
@@ -18,7 +18,7 @@ against an external frequency counter.
   - [Frequency programming](#frequency-programming)
   - [Register programming](#register-programming)
   - [Verification without readback](#verification-without-readback)
-  - [Reference calibration](#reference-calibration)
+  - [Reference frequency](#reference-frequency)
   - [MUXOUT](#muxout)
 - [Hardware gotchas](#hardware-gotchas)
 - [Troubleshooting](#troubleshooting)
@@ -83,8 +83,12 @@ Compiling is timestamp driven: `compile` and `upload` rebuild only when a
 source file is newer than the last binary, so they do nothing when nothing
 has changed. Every real rebuild bumps `FIRMWARE_VERSION_MINOR` in
 `version.h`, which gives each binary a version of its own. The version is
-stored with the calibration record and checked on load, so a record written
-by different firmware is discarded rather than half-trusted.
+stored with the reference record, and the record carries its own layout
+marker, checked on load, so a record written in a different layout is
+discarded rather than half-trusted. The marker is deliberately not the
+firmware version: `make compile` bumps the version on every build, so
+stamping records with it would discard a saved reference on the next
+recompile.
 
 ```sh
 make compile
@@ -164,14 +168,14 @@ and reference frequency.
 | `s` | Select ADF4350 or ADF4351 |
 | `f` | Set output frequency |
 | `r` | Set reference frequency |
-| `c` | Calibrate reference from counter |
-| `z` | Reset calibration to nominal reference |
+| `z` | Reset reference to nominal |
 | `F` | Factory settings (erase EEPROM) |
 | `p` | Set RF power |
 | `e` | Enable RF output |
 | `d` | Disable RF output |
 | `a` | Read RF detector A/D |
 | `l` | Read lock status |
+| `w` | Measure reference via MUXOUT (needs MUXOUT on P8) |
 | `u` | Select MUXOUT monitor source |
 | `i` | Show current settings |
 | `m` | Show menu |
@@ -207,14 +211,13 @@ network and load.
 The sketch is a flat set of files with global state rather than classes.
 `rf_bench2.ino` holds setup, the loop, and the global settings.
 `synth.cpp` owns everything to do with the synthesizer chip.
-`menu.cpp` owns the serial interface, EEPROM calibration, and settings.
+`menu.cpp` owns the serial interface, the EEPROM reference record, and settings.
 
 The global settings are:
 
-    double referenceMHz;         // in use, possibly corrected
-    double nominalReferenceMHz;  // as the user entered it
+    double referenceMHz;         // in use, programmed as entered
+    double nominalReferenceMHz;  // what z restores
     double outputMHz;
-    double refCorrectionFactor;
     uint8_t rfPower;
     bool rfOutputEnabled;
     SynthType synthType;
@@ -329,45 +332,33 @@ how the programming is verified. If the prediction matches the target and
 the counter disagrees, the discrepancy is real and the reference or the
 loop is at fault, not the register math.
 
-### Reference calibration
+### Reference frequency
 
-The reference is held as a pair. `nominalReferenceMHz` is what the user
-entered with `r`; `referenceMHz` is what the code actually programs with.
-They differ only after a calibration.
+The reference is a single number, entered with `r`, and it is programmed
+exactly as entered. There is no frequency correction applied on top of it.
 
-`c` asks for a complete frequency counter reading, computes
-`factor = measuredHz / programmedHz` from the decoded register image,
-and scales `referenceMHz` by it. Because the factor comes from the
-programmed frequency rather than the requested target, fractional-N
-quantization cannot leak into the calibration.
+That is deliberate. Scaling the reference to absorb a measured output error
+looks like a calibration, but the reference feeds straight into the PFD
+rate in `calculateRegisters()`, so a correction feeds a wrong PFD back into
+the loop and asks it for an N it cannot lock to. A wrong output is a fault
+to diagnose, not an offset to compensate away: with a GPS-locked reference
+there is nothing to correct, and an output that is off is the loop telling
+you something. `z` restores the reference to nominal.
 
-Calibration aborts if the measured frequency is more than 20% off the
-programmed output, or if the recalculated reference leaves the 1 to
-100 MHz range.
-
-Entering `0` resets to the nominal reference, as does `z`. `z` exists
-because after a calibration you often want to back out the correction
-without re-entering the reference by hand.
-
-The record in EEPROM is a struct with a magic value, a CRC-32 over the
-preceding bytes, and range checks on load:
+The record in EEPROM is a struct with a magic value, a layout marker, a
+CRC-32 over the preceding bytes, and range checks on load:
 
     struct CalibrationData {
       uint32_t magic;                  // 0x41444643, 'ADFC'
-      double correctionFactor;
       double referenceMHz;
       double nominalReferenceMHz;
+      uint32_t format;                 // record layout marker
       uint32_t checksum;               // CRC-32
     };
 
-Any failed check means the compiled-in defaults are kept, so a corrupted
-or truncated record degrades to a known state rather than a wild
+Any failed check means the compiled-in defaults are kept, so a corrupted,
+truncated, or stale record degrades to a known state rather than a wild
 frequency.
-
-`nominalReferenceMHz` was added to the struct so `z` can restore what the
-user entered instead of the compiled-in default. Records written by
-firmware predating that field fail the CRC and are discarded, which is
-the intended behaviour.
 
 ### MUXOUT
 

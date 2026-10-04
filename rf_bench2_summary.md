@@ -128,14 +128,14 @@ The menu commands are:
     s - Select ADF4350 or ADF4351
     f - Set output frequency
     r - Set reference frequency
-    c - Calibrate reference from counter
-    z - Reset calibration to nominal
+    z - Reset reference to nominal
     F - Factory settings (erase EEPROM)
     p - Set RF power
     e - Enable RF output
     d - Disable RF output
     a - Read RF detector A/D
     l - Read lock status
+    w - Measure reference via MUXOUT (needs MUXOUT on P8)
     u - Select MUXOUT monitor source
     i - Show current settings
     m - Show this menu
@@ -317,44 +317,33 @@ MUXOUT is an output, so the Oak side must be input only, with no
 pull-ups and nothing that can back-drive it. Note that MUXOUT is
 tristated until R2 is written, so it floats during reset.
 
-## Reference calibration and EEPROM storage
+## Reference frequency and EEPROM storage
 
-Menu option `c` calibrates the reference frequency against an external
-frequency counter reading with 1 Hz accuracy:
-
-1. The user enters the complete frequency counter reading in Hz (e.g.
-   `1000000023` or with commas `1,000,000,023`) or in MHz (e.g.
-   `1000.000023`). Entering `0` resets to the nominal reference.
-2. The controller computes the exact correction factor from the
-   synthesized hardware-programmed output frequency:
-   `factor = measuredHz / programmedHz`. This prevents fractional-N
-   quantization error from corrupting the reference calibration.
-3. The reference frequency is updated: `referenceMHz *= factor`, and
-   `refCorrectionFactor = referenceMHz / nominalReferenceMHz`.
-4. The synthesizer is reprogrammed so that the actual output shifts to
-   match the commanded target frequency.
-5. The calibration data is saved to EEPROM.
-
-Calibration aborts if the measured frequency deviates from the
-programmed output by more than 20 percent, and if the recalculated
-reference falls outside 1 to 100 MHz.
+The reference is a single value entered with `r`, and it is programmed
+exactly as entered. No frequency correction is applied on top of it, and
+that is deliberate: the reference feeds straight into the PFD rate, so
+scaling it to absorb a measured output error feeds a wrong PFD back into
+the loop and asks it for an N it cannot lock to. With a GPS-locked
+reference there is nothing to correct, so a wrong output is a fault to
+diagnose rather than an offset to compensate away. `z` restores the
+reference to nominal.
 
 The EEPROM record is:
 
     struct CalibrationData {
       uint32_t magic;                  // 0x41444643, 'ADFC'
-      double correctionFactor;
       double referenceMHz;
       double nominalReferenceMHz;
+      uint32_t format;                 // record layout marker
       uint32_t checksum;               // CRC-32 over the preceding bytes
     };
 
-The record is validated on load: magic, then CRC-32, then range checks
-on the factor (0.5 to 2.0) and both reference values (1 to 100 MHz).
+The record is validated on load: magic, then CRC-32, then the layout
+marker, then range checks on both reference values (1 to 100 MHz).
 Any failure means the defaults are kept.
 
-The record grew a `nominalReferenceMHz` field so that `z` can restore
-the reference the user entered rather than the compiled-in default.
-Data written by firmware predating that field fails the checksum, which
-is the intended behaviour: a calibration from an older build is
-discarded rather than half-read.
+The layout marker is not the firmware version. `make compile` bumps the
+version on every rebuild, so stamping records with it would discard a
+saved reference on the next recompile. A size change to the record is
+already caught by the checksum, so the marker only has to move when the
+meaning of a field changes rather than its size.
