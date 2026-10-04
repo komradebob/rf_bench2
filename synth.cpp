@@ -18,12 +18,14 @@ static const uint32_t ADF_REG2_CP      = 0x00001E00UL;
 static const uint32_t ADF_REG2_LDF     = 0x00000100UL;
 static const uint32_t ADF_REG2_PD_POL  = 0x00000040UL;
 static const uint32_t ADF_REG2_MUXOUT  = 0x1C000000UL;
-static const uint32_t ADF_REG3_CLKMOD  = 0x00030000UL;
+static const uint32_t ADF_REG3_BANDCLK_HIGH = 0x00800000UL;
+static const uint32_t ADF_REG3_CSR         = 0x00040000UL;
 static const uint32_t ADF_REG4_BANDCLK = 0x000FF000UL;
 static const uint32_t ADF_REG4_RFDIV   = 0x00700000UL;
 static const uint32_t ADF_REG4_FB_FUND = 0x00800000UL;
 static const uint32_t ADF_REG4_PWR     = 0x00000018UL;
 static const uint32_t ADF_REG4_RF_EN   = 0x00000020UL;
+static const uint32_t ADF_REG4_MUTE_TILL_LOCK = 0x00000400UL;
 static const uint32_t ADF_REG5_LD_DIG  = 0x00400000UL;
 
 
@@ -34,7 +36,7 @@ static const uint32_t MAX_PFD_MHZ = 32.0;
 static const uint16_t MAX_MODULUS = 4095;
 static const uint16_t MAX_R_COUNTER = 1023;
 static const uint16_t PHASE_VALUE = 1;
-static const uint32_t CHARGE_PUMP_INDEX = 0x0000000FUL;
+static const uint32_t CHARGE_PUMP_INDEX = 7;
 
 static uint16_t gcd16(uint16_t a, uint16_t b) {
   while (b != 0) {
@@ -238,20 +240,18 @@ void calculateRegisters() {
 
   /*
     R2: 10-bit reference counter, charge pump, lock detect, address 2.
-    Bit 13 enables double buffering so that the R1 and R4 changes are
-    latched by the final write to R0.
 
-    Bit 6, the charge pump polarity, is deliberately left at zero, the
-    ADF4350 default for a standard passive loop filter. Setting it inverted
-    stops the loop from ever pulling the VCO onto its target frequency and
-    leaves it sitting high instead. The symptom is unmistakable once the
-    reference is trusted: the output lands at a repeatable fraction above
-    the request rather than wandering, which is what an unlocked VCO does
-    not do.
+    Bit 6 sets the charge pump polarity and bit 13 would enable double
+    buffering. Both follow the known-good bench implementation in
+    ../4350/adf4350, which locks on this hardware where the datasheet
+    defaults do not: it sets bit 6 and leaves double buffering off, so R0
+    is written twice in programSynthesizer() rather than relying on it to
+    latch R1 and R4. Setting bit 6 is what lets the loop pull the VCO onto
+    its target; with it clear the VCO parks above the top of its band.
   */
   adfRegisters[2] =
     (((uint32_t)rCounter << 14) & ADF_REG2_RCNT) |
-    ADF_REG2_DB |
+    ADF_REG2_PD_POL |
     ((CHARGE_PUMP_INDEX << 9) & ADF_REG2_CP) |
     (frac == 0 ? ADF_REG2_LDF : 0UL) |
     ((muxoutMode << 26) & ADF_REG2_MUXOUT) |
@@ -272,15 +272,11 @@ R3 is written as its address alone.
     R4: RF output enable, RF power, band select clock divider,
     output divider, feedback from VCO, address 4
 
-    The band select clock has to stay under 125 MHz, so the divider is the
-    largest one that keeps the divided reference below that.
+    The band select divider is a fixed 250, paired with the R3 band select
+    clock mode high bit, exactly as the known-good implementation has it.
+    Choosing it from the reference instead, as this used to, produced a band
+    select clock of tens of MHz that would not calibrate the VCO.
   */
-  uint16_t bandClockDivider = 1;
-  while (referenceMHz / bandClockDivider > 125.0 &&
-         bandClockDivider < 255) {
-    bandClockDivider++;
-  }
-
   adfRegisters[4] = ADF_REG4_FB_FUND;
   adfRegisters[4] &= ~ADF_REG4_PWR;
   adfRegisters[4] |= ((uint32_t)(rfPower & 0x03) << 3) & ADF_REG4_PWR;
@@ -292,14 +288,19 @@ R3 is written as its address alone.
   }
 
   adfRegisters[4] &= ~(ADF_REG4_BANDCLK | ADF_REG4_RFDIV);
-  adfRegisters[4] |= ((uint32_t)bandClockDivider << 12) & ADF_REG4_BANDCLK;
+  adfRegisters[4] |= (250UL << 12) & ADF_REG4_BANDCLK;
+  adfRegisters[4] |= ADF_REG4_MUTE_TILL_LOCK;
   adfRegisters[4] |= ((uint32_t)outputDividerSelect << 20) & ADF_REG4_RFDIV;
   adfRegisters[4] |= 0x00000004;
 
   /*
     R5: lock detect pin mode = digital, address 5
+
+    Bits 17:15 carry 4 in the known-good implementation. They are not
+    documented as a control field on the ADF4350, but the bench locks with
+    them set, so they are reproduced rather than assumed harmless.
   */
-  adfRegisters[5] = ADF_REG5_LD_DIG | 0x00000005;
+  adfRegisters[5] = ADF_REG5_LD_DIG | (4UL << 15) | 0x00000005;
 
   Serial.print(F("Output: "));
   Serial.print(outputMHz, 3);
@@ -341,6 +342,11 @@ void programSynthesizer() {
     writeADFRegister(adfRegisters[i]);
     delay(2);
   }
+
+  // R0 again, matching the known-good implementation. Double buffering is
+  // off, so this is belt and braces rather than the latch itself.
+  writeADFRegister(adfRegisters[0]);
+  delay(2);
 
   printLine(F("Synthesizer programming complete."));
 }
