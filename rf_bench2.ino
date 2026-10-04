@@ -21,13 +21,12 @@ SynthType synthType = SYNTH_ADF4350;
 // MUXOUT diagnostic tap, defaulting to digital lock detect
 uint8_t muxoutMode = MUXOUT_DIGITAL_LD;
 
-// Version of the calibration record found in EEPROM, 0 when none
-uint32_t eepromVersion = 0;
+// Whether the reference in use came from EEPROM rather than the default
+bool referenceLoadedFromEeprom = false;
 
 // Initial operating values
 double referenceMHz = DEFAULT_REFERENCE_MHZ;
 double nominalReferenceMHz = DEFAULT_REFERENCE_MHZ;
-double refCorrectionFactor = 1.0;
 double outputMHz = 1000.0;
 uint8_t rfPower = 3;
 bool rfOutputEnabled = true;
@@ -95,9 +94,7 @@ void setup() {
   showSynthesizerInfo();
 
   if (loadCalibrationFromEEPROM()) {
-    Serial.print(F("Loaded calibration from EEPROM: factor = "));
-    Serial.print(refCorrectionFactor, 8);
-    Serial.print(F(", reference = "));
+    Serial.print(F("Loaded reference from EEPROM: "));
     Serial.print(referenceMHz, 6);
     Serial.println(F(" MHz"));
   } else {

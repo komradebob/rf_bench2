@@ -105,7 +105,6 @@ double getMuxoutExpectedFrequencyHz();
 const double DEFAULT_REFERENCE_MHZ = 10.0;
 extern double referenceMHz;
 extern double nominalReferenceMHz;
-extern double refCorrectionFactor;
 extern double outputMHz;
 extern uint8_t rfPower;
 extern bool rfOutputEnabled;
@@ -120,10 +119,10 @@ extern bool rfOutputEnabled;
 #include "version.h"
 
 /*
-  Version of the calibration record found in EEPROM, or 0 when no valid
-  record is present. Set by loadCalibrationFromEEPROM().
+  True when the reference in use was loaded from EEPROM, false when the
+  compiled-in default is in use. Set by loadCalibrationFromEEPROM().
 */
-extern uint32_t eepromVersion;
+extern bool referenceLoadedFromEeprom;
 
 void printPackedVersion(uint32_t version);
 
@@ -146,7 +145,6 @@ void showSynthesizerInfo();
 double getProgrammedOutputFrequencyHz();
 bool loadCalibrationFromEEPROM();
 bool saveCalibrationToEEPROM();
-void calibrateReference();
 void factorySettings();
 
 #endif

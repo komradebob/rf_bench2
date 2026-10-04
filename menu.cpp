@@ -65,70 +65,28 @@ void printFormattedHz(double freqHz) {
   Serial.print(F(" Hz"));
 }
 
-double parseCounterReadout(String raw) {
-  raw.trim();
-  if (raw.length() == 0) return -1.0;
-  if (raw == "0") return 0.0;
-
-  String lower = raw;
-  lower.toLowerCase();
-  bool explicitMHz = false;
-  bool explicitHz = false;
-
-  if (lower.indexOf("mhz") >= 0) {
-    explicitMHz = true;
-  } else if (lower.indexOf("hz") >= 0) {
-    explicitHz = true;
-  }
-
-  // Strip commas, spaces, underscores, and letters
-  String cleaned = "";
-  bool hasDot = false;
-  for (size_t i = 0; i < raw.length(); i++) {
-    char c = raw[i];
-    if (isDigit(c)) {
-      cleaned += c;
-    } else if (c == '.' && !hasDot) {
-      cleaned += c;
-      hasDot = true;
-    }
-  }
-
-  if (cleaned.length() == 0) return -1.0;
-
-  double val = strtod(cleaned.c_str(), nullptr);
-  if (val <= 0.0 || isnan(val) || isinf(val)) return -1.0;
-
-  double freqHz = 0.0;
-  if (explicitMHz) {
-    freqHz = val * 1000000.0;
-  } else if (explicitHz) {
-    freqHz = val;
-  } else {
-    // If entered without units:
-    // Numbers >= 10000.0 are in Hz (e.g. 1000000000 or 35000000)
-    // Numbers < 10000.0 are in MHz (e.g. 1000.000000 or 144.000000)
-    if (val < 10000.0) {
-      freqHz = val * 1000000.0;
-    } else {
-      freqHz = val;
-    }
-  }
-
-  return freqHz;
-}
-
 // EEPROM Calibration storage
 struct CalibrationData {
   uint32_t magic;
-  double correctionFactor;
   double referenceMHz;
   double nominalReferenceMHz;
-  uint32_t version;
+  uint32_t format;
   uint32_t checksum;
 };
 
 const uint32_t CALIBRATION_MAGIC = 0x41444643; // 'ADFC'
+
+/*
+  Record layout marker, checked on load and written on save.
+
+  This is deliberately not the firmware version. `make compile` bumps
+  FIRMWARE_VERSION_MINOR on every rebuild, so stamping records with it
+  would throw away a saved reference on the next recompile and the setting
+  would never survive a build. A layout change is already caught by the
+  checksum, which covers the changed bytes, so this only has to move when
+  the meaning of a field changes rather than its size.
+*/
+const uint32_t REFERENCE_RECORD_FORMAT = 2;
 
 void printPackedVersion(uint32_t version) {
   Serial.print((version >> 16) & 0xFF);
@@ -161,7 +119,7 @@ bool loadCalibrationFromEEPROM() {
   EEPROM.get(0, data);
   EEPROM.end();
 
-  eepromVersion = 0;
+  referenceLoadedFromEeprom = false;
 
   if (data.magic != CALIBRATION_MAGIC) {
     return false;
@@ -172,18 +130,12 @@ bool loadCalibrationFromEEPROM() {
     return false;
   }
 
-  if (data.version != FIRMWARE_VERSION) {
-    Serial.print(F("EEPROM calibration written by firmware version "));
-    printPackedVersion(data.version);
-    Serial.print(F(", this is version "));
-    printPackedVersion(FIRMWARE_VERSION);
+  if (data.format != REFERENCE_RECORD_FORMAT) {
+    Serial.print(F("EEPROM reference record format "));
+    Serial.print(data.format);
+    Serial.print(F(", this firmware expects format "));
+    Serial.print(REFERENCE_RECORD_FORMAT);
     Serial.println(F(". Discarding it."));
-    return false;
-  }
-
-  if (isnan(data.correctionFactor) || isinf(data.correctionFactor) ||
-      data.correctionFactor < 0.5 || data.correctionFactor > 2.0) {
-    Serial.println(F("EEPROM calibration factor out of bounds."));
     return false;
   }
 
@@ -199,20 +151,18 @@ bool loadCalibrationFromEEPROM() {
     return false;
   }
 
-  refCorrectionFactor = data.correctionFactor;
   referenceMHz = data.referenceMHz;
   nominalReferenceMHz = data.nominalReferenceMHz;
-  eepromVersion = data.version;
+  referenceLoadedFromEeprom = true;
   return true;
 }
 
 bool saveCalibrationToEEPROM() {
   CalibrationData data;
   data.magic = CALIBRATION_MAGIC;
-  data.correctionFactor = refCorrectionFactor;
   data.referenceMHz = referenceMHz;
   data.nominalReferenceMHz = nominalReferenceMHz;
-  data.version = FIRMWARE_VERSION;
+  data.format = REFERENCE_RECORD_FORMAT;
   data.checksum = calculateCalibrationChecksum(data);
 
   EEPROM.begin(sizeof(CalibrationData));
@@ -221,9 +171,9 @@ bool saveCalibrationToEEPROM() {
   EEPROM.end();
 
   if (ok) {
-    printLine(F("Calibration saved to EEPROM."));
+    printLine(F("Reference saved to EEPROM."));
   } else {
-    printLine(F("Error: Failed to save calibration to EEPROM."));
+    printLine(F("Error: Failed to save reference to EEPROM."));
   }
   return ok;
 }
@@ -253,19 +203,16 @@ void printMenu() {
   printPackedVersion(FIRMWARE_VERSION);
   Serial.println();
 
-  Serial.print(F("EEPROM Calibration:  "));
-  if (eepromVersion == FIRMWARE_VERSION) {
-    printPackedVersion(eepromVersion);
-  } else {
-    Serial.println(F("none, using defaults"));
-  }
+  Serial.print(F("Reference Source:    "));
+  Serial.println(referenceLoadedFromEeprom
+    ? F("EEPROM")
+    : F("compiled-in default"));
   Serial.println(F("-----------------------------------"));
   Serial.println(F("========== RF BENCH MENU =========="));
   Serial.println(F("s - Select synthesizer"));
   Serial.println(F("f - Set output frequency"));
   Serial.println(F("r - Set reference frequency"));
-  Serial.println(F("c - Calibrate reference from counter"));
-  Serial.println(F("z - Reset calibration to nominal"));
+  Serial.println(F("z - Reset reference to nominal"));
   Serial.println(F("F - Factory settings (erase EEPROM)"));
   Serial.println(F("p - Set RF power"));
   Serial.println(F("e - Enable RF output"));
@@ -314,22 +261,10 @@ void showSettings() {
   printPackedVersion(FIRMWARE_VERSION);
   Serial.println();
 
-  Serial.print(F("EEPROM calibration:    "));
-  if (eepromVersion == FIRMWARE_VERSION) {
-    printPackedVersion(eepromVersion);
-    Serial.println(F(" (valid)"));
-  } else {
-    Serial.println(F("none, using defaults"));
-  }
-
-  Serial.print(F("Reference correction factor: "));
-  Serial.println(refCorrectionFactor, 8);
-
-  double ppm = (refCorrectionFactor - 1.0) * 1e6;
-  Serial.print(F("Reference offset: "));
-  if (ppm >= 0.0) Serial.print('+');
-  Serial.print(ppm, 3);
-  Serial.println(F(" ppm"));
+  Serial.print(F("Reference source:      "));
+  Serial.println(referenceLoadedFromEeprom
+    ? F("EEPROM")
+    : F("compiled-in default"));
 
   Serial.print(F("RF power code: "));
   Serial.println(rfPower);
@@ -416,134 +351,12 @@ void setReference() {
 
   referenceMHz = value;
   nominalReferenceMHz = value;
-  refCorrectionFactor = 1.0;
   programSynthesizer();
   saveCalibrationToEEPROM();
-}
-
-void calibrateReference() {
-  Serial.println();
-  Serial.println(F("--- Calibrate Reference Frequency ---"));
-
-  if (!rfOutputEnabled) {
-    printLine(F("Note: RF output is currently disabled. Enabling RF output for counter measurement..."));
-    rfOutputEnabled = true;
-    programSynthesizer();
-  }
-
-  double progHz = getProgrammedOutputFrequencyHz();
-
-  Serial.print(F("Target output:        "));
-  Serial.print(outputMHz, 6);
-  Serial.println(F(" MHz"));
-
-  Serial.print(F("Programmed output:    "));
-  printFormattedHz(progHz);
-  Serial.print(F(" ("));
-  Serial.print(progHz / 1000000.0, 6);
-  Serial.println(F(" MHz)"));
-
-  Serial.print(F("Current reference:    "));
-  Serial.print(referenceMHz, 6);
-  Serial.println(F(" MHz"));
-
-  Serial.print(F("Current correction:   "));
-  Serial.println(refCorrectionFactor, 8);
-
-  Serial.println(F("Enter complete frequency counter readout (Hz, e.g. 1000000023, or 0 to reset):"));
-  Serial.print(F("> "));
-
-  String input = readLine();
-  double measuredHz = parseCounterReadout(input);
-
-  if (measuredHz < 0.0) {
-    printLine(F("Invalid frequency counter readout. Calibration aborted."));
-    return;
-  }
-
-  if (measuredHz == 0.0) {
-    referenceMHz = nominalReferenceMHz;
-    refCorrectionFactor = 1.0;
-    Serial.print(F("Resetting reference frequency to nominal "));
-    Serial.print(referenceMHz, 6);
-    Serial.println(F(" MHz."));
-    programSynthesizer();
-    saveCalibrationToEEPROM();
-    return;
-  }
-
-  Serial.print(F("Counter reading:      "));
-  printFormattedHz(measuredHz);
-  Serial.print(F(" ("));
-  Serial.print(measuredHz / 1000000.0, 6);
-  Serial.println(F(" MHz)"));
-
-  double deviationRatio = fabs(measuredHz - progHz) / progHz;
-  if (deviationRatio > 0.20) {
-    printLine(F("Warning: Measured frequency deviates by >20% from programmed output."));
-    printLine(F("Please verify frequency counter connection. Calibration aborted."));
-    return;
-  }
-
-  // Exact factor: ratio of measured physical frequency to programmed synth frequency
-  double factor = measuredHz / progHz;
-  double newReferenceMHz = referenceMHz * factor;
-
-  if (newReferenceMHz < 1.0 || newReferenceMHz > 100.0) {
-    printLine(F("Calculated reference frequency outside 1 to 100 MHz range. Calibration aborted."));
-    return;
-  }
-
-  double oldReferenceMHz = referenceMHz;
-  referenceMHz = newReferenceMHz;
-  refCorrectionFactor = referenceMHz / nominalReferenceMHz;
-
-  double deltaHz = measuredHz - progHz;
-
-  Serial.println();
-  Serial.println(F("Calibration results:"));
-  Serial.print(F("  Measured error:      "));
-  if (deltaHz >= 0.0) Serial.print('+');
-  Serial.print(deltaHz, 1);
-  Serial.print(F(" Hz ("));
-  double errPpm = (deltaHz / progHz) * 1e6;
-  if (errPpm >= 0.0) Serial.print('+');
-  Serial.print(errPpm, 3);
-  Serial.println(F(" ppm)"));
-
-  Serial.print(F("  Old reference:       "));
-  Serial.print(oldReferenceMHz, 6);
-  Serial.println(F(" MHz"));
-
-  Serial.print(F("  New reference:       "));
-  Serial.print(referenceMHz, 6);
-  Serial.println(F(" MHz"));
-
-  Serial.print(F("  Correction factor:   "));
-  Serial.println(refCorrectionFactor, 8);
-
-  double offsetPpm = (refCorrectionFactor - 1.0) * 1e6;
-  Serial.print(F("  Offset from nominal: "));
-  if (offsetPpm >= 0.0) Serial.print('+');
-  Serial.print(offsetPpm, 3);
-  Serial.println(F(" ppm"));
-
-  printLine(F("Reprogramming synthesizer with corrected reference..."));
-  programSynthesizer();
-
-  saveCalibrationToEEPROM();
-
-  double newProgHz = getProgrammedOutputFrequencyHz();
-  Serial.print(F("New programmed output: "));
-  printFormattedHz(newProgHz);
-  Serial.print(F(" ("));
-  Serial.print(newProgHz / 1000000.0, 6);
-  Serial.println(F(" MHz)"));
 }
 
 void resetCalibration() {
   referenceMHz = nominalReferenceMHz;
-  refCorrectionFactor = 1.0;
   programSynthesizer();
   saveCalibrationToEEPROM();
   Serial.print(F("Calibration reset to nominal reference: "));
@@ -597,7 +410,7 @@ void factorySettings() {
   printLine(F("--- FACTORY SETTINGS ---"));
   printLine(F("This erases the calibration stored in EEPROM and restores:"));
   printLine(F("  Synthesizer   : ADF4350, 137.5 to 4400 MHz"));
-  printLine(F("  Reference     : 10.000000 MHz nominal, factor 1.00000000"));
+  printLine(F("  Reference     : 10.000000 MHz"));
   printLine(F("  Output        : 1000.000000 MHz"));
   printLine(F("  RF power code : 3 (~+5 dBm), RF output ON"));
   printLine(F("  MUXOUT monitor: 6, digital lock detect"));
@@ -621,12 +434,11 @@ void factorySettings() {
   synthType = SYNTH_ADF4350;
   referenceMHz = DEFAULT_REFERENCE_MHZ;
   nominalReferenceMHz = DEFAULT_REFERENCE_MHZ;
-  refCorrectionFactor = 1.0;
   outputMHz = 1000.0;
   rfPower = 3;
   rfOutputEnabled = true;
   muxoutMode = MUXOUT_DIGITAL_LD;
-  eepromVersion = 0;
+  referenceLoadedFromEeprom = false;
 
   EEPROM.begin(sizeof(CalibrationData));
 
@@ -696,10 +508,6 @@ void handleCommand(char command) {
 
     case 'r':
       setReference();
-      break;
-
-    case 'c':
-      calibrateReference();
       break;
 
     case 'z':
